@@ -1,8 +1,10 @@
 #!/usr/bin/env python
+import functools
 import json
 import re
 import requests
 import sys
+
 
 conf = {
     'user': 'viofik_liveintent',
@@ -18,7 +20,14 @@ def rt_get(req, params=None, method=requests.get, **kwds):
                auth=(conf['user'], conf['password']), **kwds)
     if not r.ok:
         raise Exception("RT API response: " + r.reason)
-    return r.text
+
+    lines = r.text.splitlines()
+    if not re.match("RT/[0-9.]+ 200 Ok$", lines[0]):
+        raise Exception("Bad response status: " + lines[0])
+    if lines[1]:
+        raise Exception("Expected empty string, found: " + lines[1])
+
+    return lines[2:]
 
 
 def rt_post(req, data, **kwds):
@@ -27,9 +36,6 @@ def rt_post(req, data, **kwds):
 
 def parse_tickets_list(lines):
     lines = iter(lines)
-    line = next(lines)
-    if not re.match("RT/[0-9.]+ 200 Ok$", line):
-        raise Exception("Unexpected response status: " + line)
     line = next(lines)
     if line != "id\tCF.{Tags}":
         raise Exception("Unexpected response header: " + line)
@@ -59,19 +65,34 @@ def get_tickets():
         'fields': "CF.{Tags}",
         'format': "s",
     }
-    text = rt_get('search/ticket', params)
-    return parse_tickets_list(filter(None, text.split('\n')))
+    lines = rt_get('search/ticket', params)
+    return parse_tickets_list(filter(None, lines))
 
 
-def rt_set_owner(tid, owner, tags):
-    data = "Owner: %s\nCF.{Tags}: %s\n" % (owner, tags)
-    return rt_post('ticket/%s/edit' % tid, data)
+@functools.lru_cache(maxsize=None)
+def find_user(user):
+    res = rt_get('user/' + user, {'fields': 'Name'})
+    try:
+        res.index('Name: ' + user)
+        return user
+    except ValueError:
+        pass
+
+    if not user.endswith('_' + conf['queue']):
+        return find_user(user + '_' + conf['queue'])
 
 
 def update_owners():
     for tid, value in get_tickets().items():
-        sys.stdout.write("%s -> %s\n" % (tid, value['owner']))
-        rt_set_owner(tid, value['owner'], value['tags'])
+        owner = find_user(value['owner'])
+        if owner:
+            sys.stdout.write("%s -> %s\n" % (tid, owner))
+            data = "Owner: %s\nCF.{Tags}: %s\n" % (owner, value['tags'])
+        else:
+            sys.stdout.write("%s -> %s -- user not found!\n"
+                             % (tid, value['owner']))
+            data = "CF.{Tags}: %s\n" % (value['tags'])
+        rt_post('ticket/%s/edit' % tid, data)
 
 
 def main():
